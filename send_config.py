@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+
 """
 send_config.py - send a CONFIG frame to update thresholds for one ticker.
 
@@ -38,15 +38,13 @@ DST_MAC           = b'\xff' * 6
 TICKERS = {
     'QCOM': b'QCOM',
     'TSLA': b'TSLA',
-    'GME':  b'GME ',   # space-padded
+    'GME':  b'GME ',
     'NVDA': b'NVDA',
 }
-
 
 def get_iface_mac(iface):
     with open(f'/sys/class/net/{iface}/address') as f:
         return bytes.fromhex(f.read().strip().replace(':', ''))
-
 
 def main():
     if len(sys.argv) != 5:
@@ -90,7 +88,6 @@ def main():
           f"sell_above=${sell_above/100:.2f}")
     print("Watch read_stats.py output - the FPGA should emit a STATS "
           "frame within a few ms with the updated thresholds.")
-
 
 if __name__ == '__main__':
     main()

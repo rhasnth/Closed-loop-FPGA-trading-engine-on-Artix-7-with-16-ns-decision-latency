@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+
 """
 read_stats.py - listen for and decode the FPGA's stats frames.
 
@@ -38,7 +38,8 @@ import time
 ETHER_TYPE_STATS = 0x88B9
 TICKERS = ['QCOM', 'TSLA', 'GME', 'NVDA']
 
-
+# offsets below are post-preamble (kernel strips the 8-byte preamble+SFD
+# before AF_PACKET hands us the frame). offset 0 = first dst MAC byte.
 def parse_stats(payload):
     if len(payload) < 206:
         return None
@@ -95,10 +96,8 @@ def parse_stats(payload):
 
     return s
 
-
 def render(s, last):
     def chg(cur, old, fmt='{}', cents=False):
-        # cents=True formats as a $-amount
         if cents:
             text = f"${cur/100:>10.2f}"
         else:
@@ -141,7 +140,6 @@ def render(s, last):
               f"{chg(s['sell_thr'][name], old_st, cents=True)}  "
               f"{chg(s['refused'][name], old_rf):>7}")
 
-    # P&L breakdown
     print(f"\nP&L (in cents and dollars)")
     print(f"  {'sym':<5}  {'realized $':>12}  {'mark-to-mkt $':>15}  {'total $':>12}")
     grand_realized = 0
@@ -149,10 +147,10 @@ def render(s, last):
     inventory_signed_units = 0
     inventory_abs_units    = 0
     for name in TICKERS:
-        realized = s['proceeds_sells'][name] - s['cost_buys'][name]   # signed cents
+        realized = s['proceeds_sells'][name] - s['cost_buys'][name]
         pos      = s['positions'][name]
         lp       = s['last_price'][name]
-        mtm      = pos * lp                                           # signed cents
+        mtm      = pos * lp
         total    = realized + mtm
 
         grand_realized += realized
@@ -173,7 +171,6 @@ def render(s, last):
     print(f"  absolute sum:  {inventory_abs_units:>4} units (total stock held; "
           "real exposure)")
     print()
-
 
 def main():
     if len(sys.argv) != 2:
@@ -198,7 +195,6 @@ def main():
             last = s
     except KeyboardInterrupt:
         print("\ndone.")
-
 
 if __name__ == '__main__':
     main()

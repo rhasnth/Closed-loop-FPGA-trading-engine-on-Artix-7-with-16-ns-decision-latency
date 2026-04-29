@@ -1,3 +1,16 @@
+// fpga_top.v
+//  closed-loop trading engine, single-file. Artix-7 XC7A100T on the Alientek
+//  Da Vinci Pro V4.0, on-board YT8511 RGMII PHY, 1 GbE to a Linux host.
+//
+//  frame layout on the wire (raw eth):
+//    0x88B5  fpga -> host    heartbeat
+//    0x88B6  host -> fpga    tick (ticker + price)
+//    0x88B7  fpga -> host    order
+//    0x88B8  host -> fpga    config (set thresholds)
+//    0x88B9  fpga -> host    stats / pnl
+//
+//  measured fire-pulse-to-first-byte = 16 ns (2 cyc @ 125 MHz).
+
 `timescale 1ns / 1ps
 
 module fpga_top (
@@ -14,13 +27,16 @@ module fpga_top (
     output wire [3:0]  led
 );
 
+    // 4-byte ASCII tickers. GME has a trailing space so all 4 are the same width.
     localparam [31:0] TICKER_QCOM = 32'h51434F4D;
     localparam [31:0] TICKER_TSLA = 32'h54534C41;
-    localparam [31:0] TICKER_GME  = 32'h474D4520;
+    localparam [31:0] TICKER_GME  = 32'h474D4520;  // 0x47 0x4D 0x45 0x20
     localparam [31:0] TICKER_NVDA = 32'h4E564441;
 
+    // per-ticker. fires that would breach this are refused, not queued.
     localparam signed [15:0] POSITION_LIMIT = 16'sd100;
 
+    // boot defaults. CONFIG frames overwrite at runtime.
     localparam [31:0] INIT_BUY_QCOM  = 32'd15500;
     localparam [31:0] INIT_SELL_QCOM = 32'd16000;
     localparam [31:0] INIT_BUY_TSLA  = 32'd40000;
@@ -32,6 +48,7 @@ module fpga_top (
 
     wire clk_125_u, clk_125_90_u, clk_fb_u;
     wire clk_125, clk_125_90, clk_fb, locked;
+    // 50 MHz in -> 125 MHz x2. The 90 deg one is for TXC.
     MMCME2_BASE #(
         .CLKIN1_PERIOD(20.0),
         .CLKFBOUT_MULT_F(20.0),
@@ -47,6 +64,19 @@ module fpga_top (
     BUFG b2 (.I(clk_125_90_u), .O(clk_125_90));
     BUFG b3 (.I(clk_fb_u),     .O(clk_fb));
 
+    // ---- PHY bringup ----
+    //  RXD3 has to be driven high during the PHY's reset-release window or
+    //  MODE_SEL latches as 00 = "force low-power mode" (no external pull-up
+    //  on this board, the chip's internal pull-down wins). In that mode link
+    //  still comes up and MDIO works, RGMII TX is just silently gated. Took
+    //  way too long to find this.
+    //
+    //  timeline:
+    //    t=0     reset asserted
+    //    ~1.5s   reset released
+    //    ~1.7s   stop driving RXD3 high (released to high-Z, normal RX duty)
+    //    ~2.5s   start MDIO sequencer
+    //    ~6s     link up, 1000Mb/s full duplex
     reg [29:0] boot_cnt = 0;
     always @(posedge clk_125) begin
         if (boot_cnt < 30'd750_000_000) boot_cnt <= boot_cnt + 1;
@@ -59,6 +89,7 @@ module fpga_top (
 
     wire rxd0_in, rxd1_in, rxd2_in, rxd3_in;
 
+    // the actual override - drive high during boot, then high-Z
     IOBUF iobuf_rxd3 (
         .O (rxd3_in),                
         .IO(eth_rgmii_rxd[3]),
@@ -71,10 +102,13 @@ module fpga_top (
     IOBUF iobuf_rxd1 (
         .O (rxd1_in), .IO(eth_rgmii_rxd[1]), .I(1'b0), .T(1'b1)
     );
+    // other 3 are always high-Z but go through IOBUFs anyway, keeps the
+    //  elab netlist symmetric
     IOBUF iobuf_rxd0 (
         .O (rxd0_in), .IO(eth_rgmii_rxd[0]), .I(1'b0), .T(1'b1)
     );
 
+    // MDC = clk_125 / 1280, ~97.5 kHz
     reg [10:0] mdc_phase = 0;
     reg mdc_reg = 1'b1;
     always @(posedge clk_125) begin
@@ -86,6 +120,8 @@ module fpga_top (
     assign eth_mdc = mdc_reg;
     wire post_fall = (mdc_phase == 11'd50) && ~mdc_reg;
 
+    // writes BMCR=0x1340 (autoneg+restart, full duplex) to all 32 PHY addrs.
+    //  only one is the YT8511, rest are no-ops. fire-and-forget at boot.
     localparam NUM_CMDS = 32;
     reg [27:0] cmd_rom [0:NUM_CMDS-1];
     integer ai;
@@ -186,9 +222,15 @@ module fpga_top (
     IBUF ibuf_rxc (.I(eth_rgmii_rxc), .O(rxc_ibuf));
 
     wire rx_clk_io;        
+    // RXC distribution: BUFIO for IDDR, BUFR(BYPASS) for the parser logic.
+    //  BUFG was wrong here - it adds 2-3 ns of insertion delay which slides
+    //  the IDDR sampling edge off the data eye into the transition region.
+    //  RX bytes came out random. BUFIO has the lowest insertion delay, which
+    //  is what you want for source-synchronous capture.
     BUFIO bufio_rxc (.I(rxc_ibuf), .O(rx_clk_io));
 
     wire rx_clk;           
+    // BUFR in BYPASS = same RXC, just routed to fabric
     BUFR #(
         .BUFR_DIVIDE("BYPASS"),
         .SIM_DEVICE("7SERIES")
@@ -206,6 +248,8 @@ module fpga_top (
     genvar rxi;
     generate
         for (rxi = 0; rxi < 4; rxi = rxi + 1) begin : g_rx_iddr
+            // low nibble on rising edge, high nibble on falling, both come out
+            //  together one cycle later
             IDDR #(.DDR_CLK_EDGE("SAME_EDGE_PIPELINED")) iddr_d (
                 .Q1(rx_nib_lo[rxi]), .Q2(rx_nib_hi[rxi]),
                 .C (rx_clk_io), .CE(1'b1),
@@ -215,6 +259,8 @@ module fpga_top (
         end
     endgenerate
 
+    // rx_ctl: rising = RX_DV, falling = RX_DV xor RX_ER. We don't bother
+    //  with RX_ER, just gate on DV.
     IDDR #(.DDR_CLK_EDGE("SAME_EDGE_PIPELINED")) iddr_ctl (
         .Q1(rx_dv_r), .Q2(rx_dv_f),
         .C (rx_clk_io), .CE(1'b1), .D(eth_rgmii_rx_ctl),
@@ -224,6 +270,17 @@ module fpga_top (
     wire [7:0] rx_byte_w = {rx_nib_hi, rx_nib_lo};
     wire       rx_dv_w   = rx_dv_r;
 
+    // ---- frame parser (rx_clk) ----
+    //  IDLE -> HUNT (wait for SFD 0xD5) -> BODY (count byte offsets, latch fields)
+    //  decision happens at end-of-frame (the cycle rx_dv falls). store-and-forward
+    //  because price arrives after ticker, can't decide mid-frame.
+    //
+    //  byte offsets (0 = first dst MAC byte, post-SFD):
+    //    12-13   ethertype
+    //    14-17   magic
+    //    18-21   ticker
+    //    22-25   price (BE uint32 cents) / buy_below for CONFIG
+    //    26-29   sell_above (CONFIG only)
     localparam P_IDLE   = 3'd0;
     localparam P_HUNT   = 3'd1;   
     localparam P_BODY   = 3'd2;   
@@ -242,11 +299,18 @@ module fpga_top (
     reg [31:0] rx_price_lat  = 0;
     reg [31:0] rx_ticker_lat = 0;   
 
+    // thresholds, indexed by ticker idx. CONFIG writes, ticks read.
     reg [31:0] buy_thr  [0:3];
     reg [31:0] sell_thr [0:3];
 
+    // signed for shorts. 16 bits is way more than +/-100 needs but it's free.
     reg signed [15:0] position [0:3];
 
+    // ---- per-ticker pnl state ----
+    //  host computes realised cashflow = proceeds - cost, and mtm = position
+    //  * last_price. could do the multiply on-chip with a DSP slice but no
+    //  point - fpga publishes the raw inputs and the host script does the
+    //  arithmetic. saves a DSP, frees an XPM call later if we want it.
     reg [31:0] volume_buys    [0:3];
     reg [31:0] volume_sells   [0:3];
     reg [63:0] cost_buys      [0:3];
@@ -277,6 +341,7 @@ module fpga_top (
         end
     end
 
+    // returns 3-bit idx, top bit = "no match"
     function [2:0] ticker_idx;
         input [31:0] t;
         begin
@@ -420,6 +485,10 @@ module fpga_top (
         tx_sell_sync <= {tx_sell_sync[1:0], rx_sell_tog};
         tx_cfg_sync  <= {tx_cfg_sync [1:0], rx_cfg_tog };
     end
+    // toggle synchronisers across rx_clk -> clk_125. fire pulse flips a 1-bit
+    //  toggle, three FFs on the tx side resample, XOR of last two = single-cycle
+    //  pulse. multi-bit values ride on plain 2FF synchronisers - they're stable
+    //  for many cycles before the consumer reads, so no MCP issue.
     wire fire_buy_125  = tx_buy_sync [2] ^ tx_buy_sync [1];
     wire fire_sell_125 = tx_sell_sync[2] ^ tx_sell_sync[1];
     wire cfg_ack_125   = tx_cfg_sync [2] ^ tx_cfg_sync [1];
@@ -489,6 +558,7 @@ module fpga_top (
             tx_buy_thr_s2  [cdc_i] <= tx_buy_thr_s1 [cdc_i];
             tx_sell_thr_s1 [cdc_i] <= sell_thr      [cdc_i];
             tx_sell_thr_s2 [cdc_i] <= tx_sell_thr_s1[cdc_i];
+            // double-buffer the pnl counters so stats frame sees a coherent snapshot
             tx_vol_buy_s1  [cdc_i] <= volume_buys   [cdc_i];
             tx_vol_buy_s2  [cdc_i] <= tx_vol_buy_s1 [cdc_i];
             tx_vol_sell_s1 [cdc_i] <= volume_sells  [cdc_i];
@@ -535,8 +605,9 @@ module fpga_top (
     reg        t_start_is_buy     = 1'b0;
     reg [31:0] last_buy_latency   = 0;
     reg [31:0] last_sell_latency  = 0;
-    reg [31:0] dropped_busy       = 0;
+    reg [31:0] dropped_busy       = 0;  // TODO: queue depth 2 would catch most of these
 
+    // 1 Hz heartbeat. fully static, synth folds it into ROM.
     reg [7:0] hb_frame [0:71];
     integer hk;
     initial begin
@@ -585,6 +656,12 @@ module fpga_top (
         od_frame[70] = 8'h00; od_frame[71] = 8'h00;
     end
 
+    // ---- tx framer ----
+    //  modes: IDLE / HB (heartbeat) / ORDER (response) / STATS (pnl)
+    //  priority ORDER > STATS > HB. ORDER fires 2 cyc after the pulse arrives
+    //  -> 16 ns. fire pulse during another frame = drop, counted in dropped_busy.
+    //  there's no queue. depth-1 is fine for now, deepen later if multiple
+    //  tickers cross at once.
     localparam T_IDLE = 2'd0, T_HB = 2'd1, T_ORDER = 2'd2, T_STATS = 2'd3;
 
     localparam [7:0] HB_END_PHASE    = 8'd71;    
@@ -874,6 +951,10 @@ module fpga_top (
         endcase
     end
 
+    // ---- Ethernet FCS (IEEE 802.3, polynomial 0xEDB88320 reflected) ----
+    //  byte-at-a-time, bitwise. could be a 256-entry LUT (Sarwate) for parallel
+    //  byte processing but the byte mux feeding it is already serial so there's
+    //  no point. easily hits 125 MHz like this.
     function [31:0] crc32_byte;
         input [31:0] crc_in;
         input [7:0]  data;
@@ -935,6 +1016,15 @@ module fpga_top (
         end
     end
 
+    // ---- TX physical (ODDRs) ----
+    //  each TXD bit: ODDR launching {byte[i+4] @ falling, byte[i] @ rising}.
+    //  TXC is also an ODDR but on clk_125_90 (the 90-deg shifted clock), which
+    //  centres the launch edge on the data eye at the receiver.
+    //
+    //  TXCTL is the weird one: D1=D2=active, because RGMII repurposes the falling
+    //  sample of TXCTL as TX_EN xor TX_ER. We never assert ER so the falling
+    //  sample needs to match the rising one to keep ER=0. Spent half a day
+    //  chasing this before reading the spec properly.
     genvar j;
     generate
         for (j = 0; j < 4; j = j + 1) begin : tx_bits
@@ -956,6 +1046,8 @@ module fpga_top (
         .D1(1'b1), .D2(1'b0), .R(1'b0), .S(1'b0)
     );
 
+    // ---- LEDs ----
+    //    [0] alive    [1] rx activity    [2] BUY    [3] SELL
     (* ASYNC_REG = "TRUE" *) reg [2:0] rx_act_sync = 0;
     always @(posedge clk_125)
         rx_act_sync <= {rx_act_sync[1:0], (rx_act_stretch != 0)};

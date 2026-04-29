@@ -17,6 +17,8 @@ physical-layer bringup (YT8511 strap-pin diagnosis, BUFIO/BUFR receive-clock
 fix, 90&deg; MMCM transmit-clock skew), and a full P&amp;L demonstration across
 35 executed orders.
 
+![P&L Summary](assets/pnl-summary.png)
+
 ---
 
 ## Result snapshot
@@ -76,6 +78,19 @@ After driving 35 orders across four tickers in a closed-loop session:
 Stats frames are emitted every 1 second AND immediately after each accepted
 CONFIG frame (acts as the ACK).
 
+### Verification captures
+
+Wireshark / tcpdump captures of each frame type, used to verify the wire
+protocol matches the specification:
+
+| File | Frame type |
+|------|-----------|
+| [`assets/0x88b5.png`](assets/0x88b5.png) | Heartbeat (FPGA &rarr; host) |
+| [`assets/0x88b6.png`](assets/0x88b6.png) | Tick (host &rarr; FPGA) |
+| [`assets/0x88b7.png`](assets/0x88b7.png) | Order response (FPGA &rarr; host) |
+| [`assets/0x88b7_tcpdump.png`](assets/0x88b7_tcpdump.png) | Order response, tcpdump hex view |
+| [`assets/0x88b9.png`](assets/0x88b9.png) | Stats / P&L (FPGA &rarr; host) |
+
 ### Tickers and starting thresholds
 
 Hardcoded in `fpga_top.v` as `INIT_*` localparams. Settable at runtime via
@@ -95,7 +110,8 @@ the limit are refused and counted in `refused_pos[ticker]`.
 
 ## Resource utilisation
 
-Final v4 build on XC7A100T-2FGG484 (Vivado 2025.2, place-and-route):
+Final v4 build on XC7A100T-2FGG484 (Vivado 2025.2, place-and-route). Full
+utilisation report in [`docs/final_hft_utilization.txt`](docs/final_hft_utilization.txt).
 
 | Resource | Used | Available | Utilisation |
 |----------|------|-----------|-------------|
@@ -246,7 +262,7 @@ sampling edge in the centre of the data eye rather than on the bit transition.
 
 ---
 
-## Files
+## Repository layout
 
 ```
 fpga_top.v          Verilog top module (single-file design)
@@ -257,6 +273,9 @@ read_stats.py       Live stats viewer with P&L breakdown
 pnl_summary.py      One-shot P&L report for screenshots
 README.md           This file
 LICENSE             MIT licence
+.gitignore          Vivado / Python build artefact ignores
+assets/             Wireshark / tcpdump captures and the P&L screenshot
+docs/               Supplementary material (full Vivado utilisation report)
 ```
 
 ---

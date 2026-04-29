@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+
 """
 send_ticks.py - send tick frames to the FPGA's multi-ticker trader.
 
@@ -50,11 +50,9 @@ DEFAULT_THRESHOLDS = {
     'NVDA': (13000, 15000),
 }
 
-
 def get_iface_mac(iface):
     with open(f'/sys/class/net/{iface}/address') as f:
         return bytes.fromhex(f.read().strip().replace(':', ''))
-
 
 def make_tick_frame(src_mac, ticker_wire, price_cents):
     eth_hdr = DST_MAC + src_mac + ETHER_TYPE_TICK.to_bytes(2, 'big')
@@ -64,7 +62,6 @@ def make_tick_frame(src_mac, ticker_wire, price_cents):
     if pad_len > 0:
         body += b'\x00' * pad_len
     return body
-
 
 def learn_thresholds(iface, timeout_s=1.5):
     """Listen for one STATS frame; extract current thresholds.
@@ -84,14 +81,13 @@ def learn_thresholds(iface, timeout_s=1.5):
             if not r:
                 continue
             payload = sock.recv(2048)
-            # Stats frame must contain 'STAT' magic at offset 14
             if len(payload) >= 206 \
                and payload[12:14] == bytes.fromhex('88B9') \
                and payload[14:18] == b'STAT':
-                # Threshold pairs at payload offset 174 (= frame offset 182
-                # minus the 8-byte preamble+SFD that the kernel strips).
-                # 4 x (uint32 buy_thr + uint32 sell_thr).
                 thr = {}
+                # threshold pairs at payload offset 174 (= frame offset 182
+                # minus 8-byte preamble+SFD that the kernel strips for us).
+                # 4 x (uint32 buy, uint32 sell).
                 for i, name in enumerate(TICKER_ORDER):
                     off = 174 + 8 * i
                     bt = int.from_bytes(payload[off  :off+4], 'big')
@@ -102,7 +98,6 @@ def learn_thresholds(iface, timeout_s=1.5):
             continue
     return None
 
-
 def expected_action(ticker_name, price_cents, thresholds):
     bt, st = thresholds[ticker_name]
     if price_cents < bt:
@@ -110,7 +105,6 @@ def expected_action(ticker_name, price_cents, thresholds):
     if price_cents > st:
         return 'SELL'
     return f"hold (${bt/100:.2f} - ${st/100:.2f} band)"
-
 
 def main():
     if len(sys.argv) < 3:
@@ -171,7 +165,6 @@ def main():
         time.sleep(0.2)
 
     print("done.")
-
 
 if __name__ == '__main__':
     main()

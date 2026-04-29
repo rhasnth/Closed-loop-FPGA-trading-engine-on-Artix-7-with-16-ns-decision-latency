@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+
 """
 pnl_summary.py - one-shot P&L summary, formatted for screenshots.
 
@@ -21,7 +21,6 @@ from datetime import datetime
 
 ETHER_TYPE_STATS = 0x88B9
 TICKERS = ['QCOM', 'TSLA', 'GME', 'NVDA']
-
 
 def parse_stats(payload):
     if len(payload) < 206 \
@@ -56,7 +55,6 @@ def parse_stats(payload):
         s['sell_thr'][name]   = int.from_bytes(payload[178+8*i:182+8*i], 'big')
     return s
 
-
 def main():
     if len(sys.argv) != 2:
         print(__doc__)
@@ -85,7 +83,6 @@ def main():
         print("no STATS frame received in 2 s - is the FPGA running?")
         sys.exit(1)
 
-    # ----- pretty-print -----
     now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     line = '=' * 78
     sub  = '-' * 78
@@ -169,7 +166,6 @@ def main():
     print(f"  GRAND TOTAL P&L:  ${grand_total/100:>+12,.2f}   ({pnl_color})".center(78))
     print(line)
     print()
-
 
 if __name__ == '__main__':
     main()
